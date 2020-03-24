@@ -10,6 +10,8 @@
 
 #include "platform/mbed_wait_api.h"
 
+#define OBD2_DEBUG 1
+
 const char PID_NAME_0x00[]  = "PIDs supported [01 - 20]";
 const char PID_NAME_0x01[]  = "Monitor status since DTCs cleared";
 const char PID_NAME_0x02[]  = "Freeze DTC";
@@ -699,10 +701,6 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
      * See more info at: https://piembsystech.com/can-tp-protocol/
      */
 
-    // make sure at least 60 ms have passed since the last response
-    // TODO - make this delay a timeout or something
-    wait_us(60E3);
-
     // Format the message
     mbed::CANMessage tx_msg;
     tx_msg.id = 0x7df;         // 11-bit address by default
@@ -718,13 +716,15 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
     }
 
     tx_flag = false;
-
     //Attempt to write request to the CAN bus
     for(int retries = 10; retries > 0; retries--) {
         if(can.write(tx_msg)) {
             // send success
             break;
         } else if (retries <= 1) {
+#if OBD2_DEBUG
+            printf("obd2: could not write to CAN bus!\r\n");
+#endif
             return 0;
         }
     }
@@ -736,13 +736,29 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
 
     bool splitResponse = (length > 5);
 
+    // Payload length over 4 bytes requires a multi-frame transfer
+    if(splitResponse) {
+        /**
+         * Prepare the TX buffer to send a flow control packet (see below)
+         * We do this here instead of inside the loop
+         */
+        tx_msg.data[0] = 0x30;
+        memset(&tx_msg.data[1], 0, 7);
+    }
+
     // Start the rx timeout
     timeout_passed = false;
-    timeout.attach(mbed::callback(this, &OBD2Client::timeout_handler),
-            _responseTimeout);
+    timeout.attach_us(mbed::callback(this, &OBD2Client::timeout_handler),
+            _responseTimeout * 1000);
 
-    // Attempt to read back a filtered message
+    // Attempt to read back message
+    unsigned int sequence_num = 0;      // Sequence number of multi-frame payload
+    size_t max_length = length;         // Maximum length of data received
+    size_t payload_recvd = 0;           // Number of payload bytes received
+
+    // TODO this can surely be streamlined
     while(!timeout_passed) {
+
         mbed::CANMessage rx_msg;
         if(!can.read(rx_msg,
                 (_useExtendedAddressing? extended_filter_handle : base_filter_handle))) {
@@ -750,67 +766,151 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
             continue;
         }
 
-        // Make sure the message makes sense and reassemble packet
+        // Reset the timeout
+        timeout_passed = false;
+        timeout.detach();
+        timeout.attach_us(mbed::callback(this, &OBD2Client::timeout_handler),
+                _responseTimeout * 1000);
 
-        // Super confusing due the way Arduino's CAN API works (get byte by byte)
-        // TODO - rework
-        int indx = 0;
-        if(!((splitResponse ?
-                ((rx_msg.data[indx++] == 0x10) && (rx_msg.data[indx++])) : rx_msg.data[indx++])
-             &&  (rx_msg.data[indx++] == (mode | 0x40)) && (rx_msg.data[indx++]))) {
-            // Invalid format, skip
-            continue;
-        }
-
-        // Response is complete here, return
+        // Single frame payload - we're done here
         if(!splitResponse) {
-            memcpy(data, &rx_msg.data[indx], length);
-            return length;
-        }
+            // Make sure the response is correct
 
-        // Otherwise, copy the first 3 bytes
-        memcpy(data, &rx_msg.data[indx], 3);
-
-        wait_us(60E3);
-
-        // Send the flow control frame to let the transmitter know we're ready
-        tx_msg.data[0] = 0x30;
-        memset(&tx_msg.data[1], 0, 7);
-
-        tx_flag = false;
-
-        // Send the request for the next chunk
-        //Attempt to write request to the CAN bus
-        for(int retries = 10; retries > 0; retries--) {
-            if(can.write(tx_msg)) {
-                // send success
-                break;
-            } else if (retries <= 1) {
-                return 0;
-            }
-        }
-
-        /** Wait until the TX interrupt has occurred */
-        while(!tx_flag) {
-        }
-        tx_flag = false;
-
-        // Wait for a response
-        while(!timeout_passed) {
-            if(!can.read(rx_msg,
-              (_useExtendedAddressing? extended_filter_handle : base_filter_handle))) {
-                // Skip the rest until we get a valid message
+            // Bits 7-4: 0 (single frame code), Bits 3-0: data length
+            if(!(rx_msg.data[0])) {
+#if OBD2_DEBUG
+                printf("obd2: single frame packet incorrect header!\r\n");
+#endif
                 continue;
             }
 
-            // Verify sequence number
-            if(!(rx_msg.data[0] == (0x21 + 1))) {
+            // First data byte should be the requested mode OR'd with 0x40
+            if(!(rx_msg.data[1] == (mode | 0x40))) {
+#if OBD2_DEBUG
+                printf("obd2: single frame packet incorrect mode response!\r\n");
+#endif
                 continue;
             }
 
-            // Copy the data into the buffer
-            memcpy(&data[3], rx_msg.data, length-3);
+            // Second data byte should be the requested PID
+            if(!(rx_msg.data[2] == pid)) {
+#if OBD2_DEBUG
+                printf("obd2: single frame packet incorrect PID response!\r\n");
+#endif
+                continue;
+            }
+
+            // Packet is valid and payload is complete, copy it into the buffer
+            memcpy(data, &rx_msg.data[3], length);
             return length;
+        } else {
+
+            // Deal with first frame packet
+            if(sequence_num == 0) {
+                // Make sure the type identifier is 1
+                if(!((rx_msg.data[0] & 0xF0) == 0x10)) {
+#if OBD2_DEBUG
+                    printf("obd2: first frame packet incorrect header!\r\n");
+#endif
+                    continue;
+                }
+
+                // Collect the data length bits
+                uint16_t len = 0;
+                len |= ((rx_msg.data[0] & 0x0F) << 8);
+                len |= rx_msg.data[1];
+
+                // Update the max length we'll retrieve if the ECU responds with less
+                if(len < max_length) {
+                    max_length = len;
+                }
+
+                // Check the mode and PIDs
+                if(!(rx_msg.data[2] == (mode | 0x40))) {
+#if OBD2_DEBUG
+                    printf("obd2: first frame packet incorrect mode response!\r\n");
+#endif
+                    continue;
+                }
+                if(!(rx_msg.data[3] == pid)) {
+#if OBD2_DEBUG
+                    printf("obd2: first frame packet incorrect PID response!\r\n");
+#endif
+                    continue;
+                }
+
+                // Copy the partial payload data
+                // TODO change the size to 4?
+                memcpy(data, &rx_msg.data[4], 3);
+                payload_recvd += 3;
+
+            } else {
+
+                // Deal with consecutive frame packet
+
+                // Make sure the type identifier is 2
+                if(!((rx_msg.data[0] & 0xF0) == 0x20)) {
+#if OBD2_DEBUG
+                    printf("obd2: consecutive frame packet incorrect header!\r\n");
+#endif
+                    continue;
+                }
+
+                // Get the sequence number (goes from 0 to 15 and resets)
+                uint8_t sn = (rx_msg.data[0] & 0x0F);
+#if OBD2_DEBUG
+                printf("obd2: sequence num = %i\r\n", sn);
+#endif
+
+                // Make sure we're on the same packet
+                if(!((sequence_num % 16) == sn)) {
+#if OBD2_DEBUG
+                    printf("obd2: multi-frame out of sync!\r\n");
+#endif
+                    // We're out of sync, return what we got
+                    return payload_recvd;
+                }
+
+                // Limit of 7 payload bytes per frame
+                int len = ((max_length - payload_recvd) > 7)? 7 : (max_length - payload_recvd);
+
+                // Copy the partial payload data
+                memcpy(&data[payload_recvd], &rx_msg.data[1],
+                        len);
+
+                payload_recvd += len;
+
+                // See if we're done and return as appropriate
+                if(payload_recvd >= max_length) {
+                    return payload_recvd;
+                }
+            }
+
+            sequence_num++;
+
+            /**
+             * Send a flow control packet telling the ECU we're ready
+             * for the next frame of data
+             */
+            tx_flag = false;
+            //Attempt to write request to the CAN bus
+            for(int retries = 10; retries > 0; retries--) {
+                if(can.write(tx_msg)) {
+                    // send success
+                    break;
+                } else if (retries <= 1) {
+                    return 0;
+                }
+            }
+
+            /** Wait until the TX interrupt has occurred */
+            while(!tx_flag) {
+            }
+            tx_flag = false;
+
+            // Delay for a little
+            wait_us(60E3);
+
         }
     }
     return 0;

@@ -159,14 +159,14 @@ public:
      * @param[in] pid Desired PID
      * @retval Readable name of given PID
      */
-    String pid_name(uint8_t pid);
+    static String pid_name(uint8_t pid);
 
     /**
      * Get the readable units of the given PID
      * @param[in] pid Desired PID
      * @retval Readable units of the given PID
      */
-    String pid_units(uint8_t pid);
+    static String pid_units(uint8_t pid);
 
     /**
      * Get the value of the given PID
@@ -219,7 +219,7 @@ public:
 protected:
     int supported_pids_read();
 
-    int pid_read(uint8_t mode, uint8_t pid, void* data, int length);
+    int pid_read(uint8_t mode, uint8_t pid, uint8_t* data, int length);
 
     void rx_handler();
 
@@ -232,7 +232,7 @@ protected:
 
 protected:
 
-    mbed::CAN can;                      /** CAN interface handle */
+    mbed::CAN& can;                      /** CAN interface handle */
     int base_filter_handle;             /** Handle to base filter */
     int extended_filter_handle;         /** Handle to extended filter */
     mbed::Callback<void(void)> rx_cb;   /** Application RX callback */

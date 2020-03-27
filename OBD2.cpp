@@ -340,7 +340,7 @@ OBD2Client::~OBD2Client() {
 
 int OBD2Client::connect() {
 
-    if (can.frequency(500E3)) {
+    if (!can.frequency(500E3)) {
         return 2;
     }
 
@@ -353,16 +353,18 @@ int OBD2Client::connect() {
 
     // first try standard addressing
     _useExtendedAddressing = false;
-    can.filter(0x7e8, 0x7FF, CANStandard);
+    base_filter_handle = can.filter(0x7e8, 0x7FF, CANStandard);
 
     if (!supported_pids_read()) {
         // next try extended addressing
         _useExtendedAddressing = true;
-        can.filter(0x18daf110, 0x1FFFFFFF, CANExtended);
+        extended_filter_handle = can.filter(0x18daf110, 0x1FFFFFFF, CANExtended);
 
         if (!supported_pids_read()) {
             return 1;
         }
+    } else {
+        return 1;
     }
 
     return 0;
@@ -427,7 +429,7 @@ float OBD2Client::read_pid(uint8_t pid) {
 #define D value[3]
     uint8_t value[4];
 
-    if (!pid_read(0x01, pid, &value, sizeof(value))) {
+    if (!pid_read(0x01, pid, value, sizeof(value))) {
         return NAN;
     }
 
@@ -580,7 +582,7 @@ String OBD2Client::vin_read() {
 
     memset(vin, 0x00, sizeof(vin));
 
-    if (!pid_read(0x09, 0x02, vin, 17)) {
+    if (!pid_read(0x09, 0x02, (uint8_t*) vin, 17)) {
         // failed
         return "";
     }
@@ -599,7 +601,7 @@ uint32_t OBD2Client::read_pid_raw(uint8_t pid) {
 #define D value[3]
     uint8_t value[4];
 
-    if (!pid_read(0x01, pid, &value, sizeof(value))) {
+    if (!pid_read(0x01, pid, value, sizeof(value))) {
         return 0;
     }
 
@@ -626,7 +628,7 @@ String OBD2Client::ecu_name_read() {
 
     memset(ecuName, 0x00, sizeof(ecuName));
 
-    if (!pid_read(0x09, 0x0a, ecuName, 20)) {
+    if (!pid_read(0x09, 0x0a, (uint8_t*) ecuName, 20)) {
         // failed
         return "";
     }
@@ -661,7 +663,7 @@ int OBD2Client::supported_pids_read() {
     return 1;
 }
 
-int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
+int OBD2Client::pid_read(uint8_t mode, uint8_t pid, uint8_t* data, int length) {
 
     /**
      * CAN-TP (the transport protocol in this case)
@@ -729,10 +731,10 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
         }
     }
 
-    /** Wait until the TX interrupt has occurred */
-    while(!tx_flag) {
-    }
-    tx_flag = false;
+//    /** Wait until the TX interrupt has occurred */
+//    while(!tx_flag) {
+//    }
+//    tx_flag = false;
 
     bool splitResponse = (length > 5);
 
@@ -904,9 +906,9 @@ int OBD2Client::pid_read(uint8_t mode, uint8_t pid, void* data, int length) {
             }
 
             /** Wait until the TX interrupt has occurred */
-            while(!tx_flag) {
-            }
-            tx_flag = false;
+//            while(!tx_flag) {
+//            }
+//            tx_flag = false;
 
             // Delay for a little
             wait_us(60E3);

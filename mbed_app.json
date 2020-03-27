@@ -1,0 +1,20 @@
+{
+    "target_overrides": {
+        "EP_AGORA": {
+            "target.enable-objects-extensions": true,
+            "tcan4551.default-tcan-mosi": "P0_11",
+            "tcan4551.default-tcan-miso": "P0_12",
+            "tcan4551.default-tcan-sclk": "P0_7",
+            "tcan4551.default-tcan-csn": "PIN_NAME_I2S_SD",
+            "tcan4551.default-tcan-nint": "PIN_NAME_I2S_WS"
+        },
+	"NRF52840_DK": {
+	    "target.enable-objects-extensions": true,
+	    "tcan4551.default-tcan-mosi": "P0_3",
+	    "tcan4551.default-tcan-miso": "P0_4",
+	    "tcan4551.default-tcan-sclk": "P0_28",
+	    "tcan4551.default-tcan-csn": "P0_29",
+	    "tcan4551.default-tcan-nint": "P0_30"
+	}
+    }
+}
